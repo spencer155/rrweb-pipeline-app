@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-Hans-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>RRWeb 视频导出</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="header">
+      <h1>RRWeb 视频导出</h1>
+      <p class="sub">请选择放有 <span class="mono">*.json</span> 的文件夹，然后开始</p>
+    </header>
+
+    <div class="body">
+      <div class="controls">
+        <section class="panel">
+          <div class="row">
+            <label class="label">工作文件夹</label>
+            <div class="field grow">
+              <input id="folderPath" type="text" readonly placeholder="未选择" />
+              <button id="pickFolder" type="button" class="btn secondary">浏览…</button>
+            </div>
+          </div>
+
+          <div class="row">
+            <label class="label" for="mergedName">合并文件名</label>
+            <input id="mergedName" class="input grow" type="text" value="" spellcheck="false" placeholder="选择文件夹后与文件夹同名" />
+          </div>
+          <p class="hint">导出完成后自动按 JSON 顺序合并为一个 MP4；失败的片段会跳过。</p>
+
+          <div class="row">
+            <label class="label" for="fpsSelect">帧率</label>
+            <select id="fpsSelect" class="select">
+              <option value="10">10 fps（最快）</option>
+              <option value="15" selected>15 fps（推荐）</option>
+              <option value="24">24 fps（原始）</option>
+            </select>
+          </div>
+          <div class="row">
+            <label class="label" for="parallelSelect">并发数</label>
+            <select id="parallelSelect" class="select">
+              <option value="1">1</option>
+              <option value="2" selected>2（推荐）</option>
+              <option value="4">4</option>
+            </select>
+          </div>
+
+          <div class="actions">
+            <button id="startBtn" type="button" class="btn primary" disabled>开始</button>
+          </div>
+        </section>
+
+        <section id="progressWrap" class="progress-wrap is-idle" aria-live="polite">
+          <div class="progress-head">
+            <span id="progressPhase" class="progress-phase">待机</span>
+            <span id="progressFraction" class="progress-fraction"></span>
+          </div>
+          <progress id="progressBar" max="1" value="0"></progress>
+          <div id="progressDetail" class="progress-detail"></div>
+        </section>
+      </div>
+
+      <section class="log-wrap">
+        <div class="log-head">日志</div>
+        <pre id="logBox" class="log"></pre>
+      </section>
+    </div>
+  </div>
+  <script src="./renderer.js"></script>
+</body>
+</html>

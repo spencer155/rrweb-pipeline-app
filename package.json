@@ -1,0 +1,52 @@
+{
+  "name": "rrweb-pipeline",
+  "version": "1.0.0",
+  "description": "将 rrweb JSON 导出为 MP4 并可选合并",
+  "main": "main.cjs",
+  "author": "sun",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:arm64": "electron-builder --mac --arm64",
+    "dist:x64": "electron-builder --mac --x64",
+    "dist:win": "electron-builder --win --x64"
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.2.0",
+    "rrvideo": "file:vendor/rrvideo-0.2.1.tgz"
+  },
+  "devDependencies": {
+    "electron": "^28.3.3",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.local.rrweb.pipeline",
+    "productName": "RRWeb视频导出",
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "renderer/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "node_modules/rrvideo",
+        "to": "rrvideo"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "hardenedRuntime": true,
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist"
+    },
+    "directories": {
+      "output": "release"
+    }
+  }
+}

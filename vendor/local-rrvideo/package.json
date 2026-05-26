@@ -1,0 +1,56 @@
+{
+  "_from": "rrvideo",
+  "_id": "rrvideo@0.2.1",
+  "_inBundle": false,
+  "_integrity": "sha512-EumIkBkXq+C2Ki6MKXYH3bxik5kTnZWn1IO6YmdJrLXHqgoPla7XUib0HpITE8UevFMq8xufXuo0ElHdwD5AZQ==",
+  "_location": "/rrvideo",
+  "_phantomChildren": {},
+  "_requested": {
+    "type": "tag",
+    "registry": true,
+    "raw": "rrvideo",
+    "name": "rrvideo",
+    "escapedName": "rrvideo",
+    "rawSpec": "",
+    "saveSpec": null,
+    "fetchSpec": "latest"
+  },
+  "_requiredBy": [
+    "#USER",
+    "/"
+  ],
+  "_resolved": "https://registry.npmmirror.com/rrvideo/-/rrvideo-0.2.1.tgz",
+  "_shasum": "8849ead66853621884e21d3e254f33e18ca93378",
+  "_spec": "rrvideo",
+  "_where": "/usr/local/lib",
+  "author": {
+    "name": "yanzhen@smartx.com"
+  },
+  "bin": {
+    "rrvideo": "build/cli.js"
+  },
+  "bundleDependencies": false,
+  "dependencies": {
+    "@types/minimist": "^1.2.1",
+    "@types/puppeteer": "^5.4.0",
+    "bxs-rrweb-player-2": "^1.0.1",
+    "minimist": "^1.2.5",
+    "puppeteer": "^5.4.1",
+    "rrweb-player": "^0.6.5",
+    "typescript": "^4.0.5"
+  },
+  "deprecated": false,
+  "description": "transform rrweb session into video",
+  "files": [
+    "build"
+  ],
+  "license": "MIT",
+  "main": "build/index.js",
+  "name": "rrvideo",
+  "scripts": {
+    "build": "tsc",
+    "prepublish": "yarn build",
+    "test": "test"
+  },
+  "version": "0.2.1"
+}
