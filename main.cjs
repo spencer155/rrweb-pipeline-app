@@ -154,11 +154,12 @@ function spawnNodeCli({ rrvideoRoot, cliPath, args, envExtra, onData }) {
 
 function runFfmpegConcat({ workDir, listFile, outputAbs }) {
   return new Promise((resolve, reject) => {
-    if (!ffmpegBinary) {
+    const effectiveFfmpegBinary = getEffectiveFfmpegBinaryPath();
+    if (!effectiveFfmpegBinary) {
       reject(new Error("未找到 ffmpeg 可执行文件（ffmpeg-static）"));
       return;
     }
-    const child = spawn(ffmpegBinary, [
+    const child = spawn(effectiveFfmpegBinary, [
       "-y",
       "-f", "concat",
       "-safe", "0",
@@ -188,8 +189,9 @@ function runFfmpegConcat({ workDir, listFile, outputAbs }) {
 /** 探测某个 ffmpeg 编解码器在当前机器上是否可用 */
 function probeCodec(codec) {
   return new Promise((resolve) => {
-    if (!ffmpegBinary) { resolve(false); return; }
-    const child = spawn(ffmpegBinary, [
+    const effectiveFfmpegBinary = getEffectiveFfmpegBinaryPath();
+    if (!effectiveFfmpegBinary) { resolve(false); return; }
+    const child = spawn(effectiveFfmpegBinary, [
       "-hide_banner", "-loglevel", "error",
       "-f", "lavfi", "-i", "color=size=16x16:rate=1:duration=0.1",
       "-frames:v", "1",
