@@ -30,16 +30,13 @@
       "renderer/**/*"
     ],
     "asarUnpack": [
-      "node_modules/puppeteer/.local-chromium/**"
+      "node_modules/puppeteer/.local-chromium/**",
+      "node_modules/ffmpeg-static/**"
     ],
     "extraResources": [
       {
         "from": "node_modules/rrvideo",
         "to": "rrvideo"
-      },
-      {
-        "from": "node_modules/ffmpeg-static",
-        "to": "ffmpeg-static"
       }
     ],
     "mac": {

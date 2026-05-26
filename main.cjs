@@ -81,6 +81,12 @@ function getEffectiveFfmpegBinaryPath() {
   if (!ffmpegBinary) return null;
   if (!app.isPackaged) return ffmpegBinary;
 
+  const unpackedPath = ffmpegBinary.replace(
+    `${path.sep}app.asar${path.sep}`,
+    `${path.sep}app.asar.unpacked${path.sep}`,
+  );
+  if (fs.existsSync(unpackedPath)) return unpackedPath;
+
   const resourceBinaryName = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
   const resourcePath = path.join(
     process.resourcesPath,
