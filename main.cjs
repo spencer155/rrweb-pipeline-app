@@ -89,11 +89,7 @@ function getEffectiveFfmpegBinaryPath() {
   );
   if (fs.existsSync(resourcePath)) return resourcePath;
 
-  const unpackedPath = ffmpegBinary.replace(
-    `${path.sep}app.asar${path.sep}`,
-    `${path.sep}app.asar.unpacked${path.sep}`,
-  );
-  return fs.existsSync(unpackedPath) ? unpackedPath : ffmpegBinary;
+  return null;
 }
 
 function logTo(win, line) {

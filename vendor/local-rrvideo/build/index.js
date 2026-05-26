@@ -255,11 +255,12 @@ RRvideo.prototype.init = async function () {
 
         browser = await puppeteer.launch({ headless: this.config.headless });
         var page = await browser.newPage();
+        page.setDefaultNavigationTimeout(0);
         await page.setViewport({ width: outputSize.width, height: outputSize.height, deviceScaleFactor: 1 });
         await page.goto("about:blank");
-        await page.setContent(getHtml(events, playerConfig, size), { waitUntil: "load" });
-        await page.waitForFunction("window.__rrvideoReady === true && window.replayer");
-        await page.waitForSelector(".rr-player, .replayer-wrapper");
+        await page.setContent(getHtml(events, playerConfig, size), { waitUntil: "domcontentloaded", timeout: 0 });
+        await page.waitForFunction("window.__rrvideoReady === true && window.replayer", { timeout: 0 });
+        await page.waitForSelector(".rr-player, .replayer-wrapper", { timeout: 0 });
         await delay(300);
 
         var frameInterval = 1000 / this.config.fps;
