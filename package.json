@@ -37,6 +37,10 @@
       {
         "from": "node_modules/rrvideo",
         "to": "rrvideo"
+      },
+      {
+        "from": "node_modules/ffmpeg-static",
+        "to": "ffmpeg-static"
       }
     ],
     "mac": {
