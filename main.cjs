@@ -47,6 +47,47 @@ function getCliPath(rrvideoRoot) {
   return path.join(rrvideoRoot, "build", "cli.js");
 }
 
+function getPackagedChromiumExecutablePath() {
+  if (!app.isPackaged) return null;
+
+  const chromiumRoot = path.join(
+    process.resourcesPath,
+    "app.asar.unpacked",
+    "node_modules",
+    "puppeteer",
+    ".local-chromium",
+  );
+  if (!fs.existsSync(chromiumRoot)) return null;
+
+  const platformPrefix = process.platform === "darwin"
+    ? "mac-"
+    : process.platform === "win32"
+      ? (process.arch === "ia32" ? "win32-" : "win64-")
+      : "linux-";
+  const revisionDir = fs.readdirSync(chromiumRoot)
+    .find((name) => name.startsWith(platformPrefix));
+  if (!revisionDir) return null;
+
+  const executablePath = process.platform === "darwin"
+    ? path.join(chromiumRoot, revisionDir, "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium")
+    : process.platform === "win32"
+      ? path.join(chromiumRoot, revisionDir, "chrome-win", "chrome.exe")
+      : path.join(chromiumRoot, revisionDir, "chrome-linux", "chrome");
+
+  return fs.existsSync(executablePath) ? executablePath : null;
+}
+
+function getEffectiveFfmpegBinaryPath() {
+  if (!ffmpegBinary) return null;
+  if (!app.isPackaged) return ffmpegBinary;
+
+  const unpackedPath = ffmpegBinary.replace(
+    `${path.sep}app.asar${path.sep}`,
+    `${path.sep}app.asar.unpacked${path.sep}`,
+  );
+  return fs.existsSync(unpackedPath) ? unpackedPath : ffmpegBinary;
+}
+
 function logTo(win, line) {
   if (win && !win.isDestroyed()) {
     win.webContents.send("pipeline-log", line);
@@ -61,13 +102,32 @@ function progressTo(win, state) {
 
 function spawnNodeCli({ rrvideoRoot, cliPath, args, envExtra, onData }) {
   return new Promise((resolve, reject) => {
+    const nodePathEntries = [];
+    if (app.isPackaged) {
+      nodePathEntries.push(
+        path.join(process.resourcesPath, "app.asar", "node_modules"),
+        path.join(process.resourcesPath, "app.asar.unpacked", "node_modules"),
+        path.join(process.resourcesPath, "node_modules"),
+      );
+    }
+
     const env = {
       ...process.env,
       ...envExtra,
       ELECTRON_RUN_AS_NODE: "1",
     };
-    if (ffmpegBinary) {
-      const dir = path.dirname(ffmpegBinary);
+    if (nodePathEntries.length) {
+      env.NODE_PATH = [nodePathEntries.join(path.delimiter), env.NODE_PATH]
+        .filter(Boolean)
+        .join(path.delimiter);
+    }
+    const chromiumExecutablePath = getPackagedChromiumExecutablePath();
+    if (chromiumExecutablePath) {
+      env.PUPPETEER_EXECUTABLE_PATH = chromiumExecutablePath;
+    }
+    const effectiveFfmpegBinary = getEffectiveFfmpegBinaryPath();
+    if (effectiveFfmpegBinary) {
+      const dir = path.dirname(effectiveFfmpegBinary);
       env.PATH = `${dir}${path.delimiter}${env.PATH || ""}`;
     }
 

@@ -29,6 +29,10 @@
       "preload.cjs",
       "renderer/**/*"
     ],
+    "asarUnpack": [
+      "node_modules/puppeteer/.local-chromium/**",
+      "node_modules/ffmpeg-static/**"
+    ],
     "extraResources": [
       {
         "from": "node_modules/rrvideo",
