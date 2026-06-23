@@ -53,16 +53,7 @@ function getCliPath(rrvideoRoot) {
   return path.join(rrvideoRoot, "build", "cli.js");
 }
 
-function getPackagedChromiumExecutablePath() {
-  if (!app.isPackaged) return null;
-
-  const chromiumRoot = path.join(
-    process.resourcesPath,
-    "app.asar.unpacked",
-    "node_modules",
-    "puppeteer",
-    ".local-chromium",
-  );
+function resolveChromiumExecutableFromRoot(chromiumRoot) {
   if (!fs.existsSync(chromiumRoot)) return null;
 
   const platformPrefix = process.platform === "darwin"
@@ -83,15 +74,31 @@ function getPackagedChromiumExecutablePath() {
   return fs.existsSync(executablePath) ? executablePath : null;
 }
 
-function getEffectiveFfmpegBinaryPath() {
-  if (!ffmpegBinary) return null;
-  if (!app.isPackaged) return ffmpegBinary;
+function getPackagedChromiumExecutablePath() {
+  if (!app.isPackaged) return null;
 
-  const unpackedPath = ffmpegBinary.replace(
-    `${path.sep}app.asar${path.sep}`,
-    `${path.sep}app.asar.unpacked${path.sep}`,
-  );
-  if (fs.existsSync(unpackedPath)) return unpackedPath;
+  const candidates = [
+    path.join(process.resourcesPath, "chromium"),
+    path.join(
+      process.resourcesPath,
+      "app.asar.unpacked",
+      "node_modules",
+      "puppeteer",
+      ".local-chromium",
+    ),
+  ];
+
+  for (const chromiumRoot of candidates) {
+    const executablePath = resolveChromiumExecutableFromRoot(chromiumRoot);
+    if (executablePath) return executablePath;
+  }
+  return null;
+}
+
+function getEffectiveFfmpegBinaryPath() {
+  if (!app.isPackaged) {
+    return ffmpegBinary && fs.existsSync(ffmpegBinary) ? ffmpegBinary : null;
+  }
 
   const resourceBinaryName = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
   const resourcePath = path.join(
@@ -100,6 +107,14 @@ function getEffectiveFfmpegBinaryPath() {
     resourceBinaryName,
   );
   if (fs.existsSync(resourcePath)) return resourcePath;
+
+  if (ffmpegBinary) {
+    const unpackedPath = ffmpegBinary.replace(
+      `${path.sep}app.asar${path.sep}`,
+      `${path.sep}app.asar.unpacked${path.sep}`,
+    );
+    if (fs.existsSync(unpackedPath)) return unpackedPath;
+  }
 
   return null;
 }
@@ -143,6 +158,7 @@ function spawnNodeCli({ rrvideoRoot, cliPath, args, envExtra, onData }) {
     }
     const effectiveFfmpegBinary = getEffectiveFfmpegBinaryPath();
     if (effectiveFfmpegBinary) {
+      env.FFMPEG_BIN = effectiveFfmpegBinary;
       const dir = path.dirname(effectiveFfmpegBinary);
       env.PATH = `${dir}${path.delimiter}${env.PATH || ""}`;
     }
@@ -300,6 +316,16 @@ async function runPipeline(win, opts) {
   }
   if (!ffmpegBinary) {
     throw new Error("ffmpeg-static 不可用");
+  }
+  if (app.isPackaged && !getPackagedChromiumExecutablePath()) {
+    throw new Error(
+      "打包应用内未找到 Chromium，无法导出视频。请重新安装应用（需包含 Chromium 的完整安装包）。",
+    );
+  }
+  if (app.isPackaged && !getEffectiveFfmpegBinaryPath()) {
+    throw new Error(
+      "打包应用内未找到 ffmpeg，无法导出视频。请重新安装应用（需包含 ffmpeg 的完整安装包）。",
+    );
   }
 
   let jsonFiles;

@@ -170,7 +170,8 @@ function runFfmpeg(config, frameWriter) {
             });
         }
         args.push(outputPath);
-        var ffmpegProcess = child_process.spawn("ffmpeg", args);
+        var ffmpegCommand = process.env.FFMPEG_BIN || "ffmpeg";
+        var ffmpegProcess = child_process.spawn(ffmpegCommand, args);
         var settled = false;
 
         ffmpegProcess.stderr.setEncoding("utf-8");
@@ -253,7 +254,10 @@ RRvideo.prototype.init = async function () {
         playerConfig.showController = false;
         playerConfig.autoPlay = false;
 
-        browser = await puppeteer.launch({ headless: this.config.headless });
+        browser = await puppeteer.launch({
+            headless: this.config.headless,
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        });
         var page = await browser.newPage();
         page.setDefaultNavigationTimeout(0);
         await page.setViewport({ width: outputSize.width, height: outputSize.height, deviceScaleFactor: 1 });
