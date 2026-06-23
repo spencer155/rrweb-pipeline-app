@@ -1,12 +1,13 @@
 {
   "name": "rrweb-pipeline",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "将 rrweb JSON 导出为 MP4 并可选合并",
   "main": "main.cjs",
   "author": "sun",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
+    "postinstall": "mkdir -p renderer/vendor/rrweb-player && cp node_modules/bxs-rrweb-player-2/dist/style.css node_modules/bxs-rrweb-player-2/dist/index.js renderer/vendor/rrweb-player/ && cp node_modules/bxs-rrweb-player-2/dist/index.js renderer/vendor/rrweb-player/rrweb-player.bundle.js",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
     "dist:arm64": "electron-builder --mac --arm64",
@@ -14,7 +15,9 @@
     "dist:win": "electron-builder --win --x64 --publish never"
   },
   "dependencies": {
+    "bxs-rrweb-player-2": "^1.0.1",
     "ffmpeg-static": "^5.2.0",
+    "pako": "^0.2.9",
     "rrvideo": "file:vendor/rrvideo-0.2.1.tgz"
   },
   "devDependencies": {
@@ -27,6 +30,8 @@
     "files": [
       "main.cjs",
       "preload.cjs",
+      "config.cjs",
+      "lib/**/*",
       "renderer/**/*"
     ],
     "asarUnpack": [

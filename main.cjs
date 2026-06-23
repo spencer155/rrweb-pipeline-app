@@ -2,9 +2,15 @@ const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const fsp = require("fs/promises");
+const os = require("os");
 const { spawn } = require("child_process");
 
 const ffmpegBinary = require("ffmpeg-static");
+const { queryTrajectory } = require("./lib/trajectory-service.cjs");
+const { getExportDir, setExportDir } = require("./lib/user-prefs.cjs");
+
+/** 最近一次保单查询的完整轨迹（含 events），供预览与导出 */
+let lastTrajectoryCache = null;
 
 const SKIP_JSON = new Set([
   "package.json",
@@ -253,8 +259,30 @@ async function detectFastCodec() {
   return _fastCodecCache;
 }
 
+async function writeTrajectoryJsonFiles(workDir, items) {
+  await fsp.mkdir(workDir, { recursive: true });
+  const writtenFiles = [];
+  let seq = 0;
+  for (const item of items) {
+    if (!item.events || !item.events.length) continue;
+    seq += 1;
+    const safePageId = String(item.pageId || "page").replace(/[/\\:?*"|<>]/gu, "_");
+    const name = `${String(seq).padStart(3, "0")}_${safePageId}.json`;
+    await fsp.writeFile(
+      path.join(workDir, name),
+      JSON.stringify(item.events),
+      "utf8",
+    );
+    writtenFiles.push({ name, itemIndex: item.index });
+  }
+  if (!writtenFiles.length) {
+    throw new Error("没有可导出的轨迹片段（事件数据为空或解析失败）");
+  }
+  return writtenFiles;
+}
+
 async function runPipeline(win, opts) {
-  const { workDir, mergeVideos, mergedFileName } = opts;
+  const { workDir, mergeVideos, mergedFileName, items, cleanupJson = false } = opts;
   const fps = Number.isFinite(Number(opts.fps)) && Number(opts.fps) > 0
     ? Number(opts.fps) : 15;
   const parallel = [1, 2, 4].includes(Number(opts.parallel))
@@ -274,11 +302,24 @@ async function runPipeline(win, opts) {
     throw new Error("ffmpeg-static 不可用");
   }
 
-  const jsonFiles = listWorkdirJsonFiles(workDir);
-  if (!jsonFiles.length) {
-    throw new Error(
-      "当前文件夹没有可转换的 .json（已跳过 package.json、rrvideo.defaults.json、*.config.json 等）。",
+  let jsonFiles;
+  let jsonFilesToCleanup = [];
+  let itemIndexByJson = new Map();
+
+  if (Array.isArray(items) && items.length) {
+    logTo(win, `从接口数据导出 ${items.length} 个轨迹片段…`);
+    jsonFilesToCleanup = await writeTrajectoryJsonFiles(workDir, items);
+    jsonFiles = jsonFilesToCleanup.map((entry) => entry.name);
+    itemIndexByJson = new Map(
+      jsonFilesToCleanup.map((entry) => [entry.name, entry.itemIndex]),
     );
+  } else {
+    jsonFiles = listWorkdirJsonFiles(workDir);
+    if (!jsonFiles.length) {
+      throw new Error(
+        "当前文件夹没有可转换的 .json（已跳过 package.json、rrvideo.defaults.json、*.config.json 等）。",
+      );
+    }
   }
 
   const defaultsPath = path.join(workDir, "rrvideo.defaults.json");
@@ -332,7 +373,11 @@ async function runPipeline(win, opts) {
     const outName = `${path.basename(base, path.extname(base))}.mp4`;
     const outputAbs = path.join(workDir, outName);
     const args = ["--input", inputAbs, "--output", outputAbs, "--config", tempConfigPath];
+    const itemIndex = itemIndexByJson.get(base);
     logTo(win, `开始：${base} → ${outName}`);
+    if (itemIndex != null) {
+      progressTo(win, { itemIndex, itemStatus: "exporting" });
+    }
     progressTo(win, {
       completed: convertFinishedCount,
       total: totalSteps,
@@ -353,10 +398,16 @@ async function runPipeline(win, opts) {
       ok += 1;
       successOutNameByJson.set(base, outName);
       logTo(win, `完成：${outName}`);
+      if (itemIndex != null) {
+        progressTo(win, { itemIndex, itemStatus: "success" });
+      }
     } catch (e) {
       fail += 1;
       logTo(win, `失败：${base}`);
       logTo(win, String(e.message || e));
+      if (itemIndex != null) {
+        progressTo(win, { itemIndex, itemStatus: "failed" });
+      }
     } finally {
       convertFinishedCount += 1;
       progressTo(win, {
@@ -488,6 +539,12 @@ async function runPipeline(win, opts) {
     };
   } finally {
     await fsp.unlink(tempConfigPath).catch(() => {});
+    if (cleanupJson && jsonFilesToCleanup.length) {
+      for (const entry of jsonFilesToCleanup) {
+        await fsp.unlink(path.join(workDir, entry.name)).catch(() => {});
+      }
+      logTo(win, `已清理 ${jsonFilesToCleanup.length} 个中间 JSON 文件`);
+    }
   }
 }
 
@@ -495,14 +552,16 @@ let mainWindow;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1140,
-    height: 720,
-    minWidth: 860,
-    minHeight: 560,
+    width: 1480,
+    height: 920,
+    minWidth: 1100,
+    minHeight: 720,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
+      /** rrweb 回放需加载录制页中的跨域样式与资源 */
+      webSecurity: false,
     },
   });
 
@@ -534,6 +593,120 @@ ipcMain.handle("run-pipeline", async (_e, payload) => {
   try {
     const result = await runPipeline(win, payload);
     return { success: true, result };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message || String(error),
+    };
+  }
+});
+
+ipcMain.handle("query-trajectory", async (e, payload) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  const log = (line) => logTo(win, line);
+  try {
+    const result = await queryTrajectory({ ...payload, log });
+    lastTrajectoryCache = result;
+    return {
+      success: true,
+      result: {
+        policyNo: result.policyNo,
+        policyUuid: result.policyUuid,
+        items: result.items.map((item) => ({
+          index: item.index,
+          pageId: item.pageId,
+          pageDesc: item.pageDesc,
+          pageVisitTime: item.pageVisitTime,
+          durationMs: item.durationMs,
+          durationText: item.durationText,
+          error: item.error || null,
+        })),
+        steps: result.steps || [],
+      },
+    };
+  } catch (error) {
+    lastTrajectoryCache = null;
+    return {
+      success: false,
+      error: error.message || String(error),
+    };
+  }
+});
+
+ipcMain.handle("get-trajectory-events", (_e, index) => {
+  const idx = Number(index);
+  const item = lastTrajectoryCache?.items?.[idx];
+  if (!item || !item.events || !item.events.length) {
+    return {
+      success: false,
+      error: item?.error || `该片段无可用轨迹数据（index=${idx}）`,
+    };
+  }
+  let events = item.events;
+  try {
+    events = JSON.parse(JSON.stringify(item.events));
+  } catch (e) {
+    return {
+      success: false,
+      error: `轨迹数据无法序列化：${e.message || e}`,
+    };
+  }
+  return {
+    success: true,
+    events,
+    pageId: item.pageId,
+    pageDesc: item.pageDesc,
+  };
+});
+
+ipcMain.handle("get-export-dir", async () => {
+  return getExportDir(app);
+});
+
+ipcMain.handle("select-output-folder", async () => {
+  const savedDir = await getExportDir(app);
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openDirectory", "createDirectory"],
+    defaultPath: savedDir || path.join(os.homedir(), "Downloads"),
+  });
+  if (canceled || !filePaths[0]) return null;
+  await setExportDir(app, filePaths[0]);
+  return filePaths[0];
+});
+
+ipcMain.handle("export-trajectory", async (_e, payload) => {
+  const win = BrowserWindow.fromWebContents(_e.sender);
+  try {
+    if (!lastTrajectoryCache?.items?.length) {
+      throw new Error("请先查询保单轨迹");
+    }
+    const outputDir = payload.outputDir;
+    if (!outputDir) {
+      throw new Error("请选择导出目录");
+    }
+    const exportable = lastTrajectoryCache.items.filter(
+      (item) => item.events && item.events.length,
+    );
+    if (!exportable.length) {
+      throw new Error("没有可导出的轨迹片段（事件数据为空或解析失败）");
+    }
+
+    const mergedBase = payload.mergedFileName && payload.mergedFileName.trim()
+      ? payload.mergedFileName.trim().replace(/\.mp4$/iu, "")
+      : `${lastTrajectoryCache.policyNo || "trajectory"}_merged`;
+    const mergedFileName = `${mergedBase}.mp4`;
+
+    const result = await runPipeline(win, {
+      workDir: outputDir,
+      items: exportable,
+      cleanupJson: true,
+      mergeVideos: payload.mergeVideos !== false,
+      mergedFileName,
+      fps: payload.fps,
+      parallel: payload.parallel,
+    });
+    await setExportDir(app, outputDir);
+    return { success: true, result, outputDir };
   } catch (error) {
     return {
       success: false,

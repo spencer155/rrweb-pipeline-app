@@ -3,72 +3,180 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' https: data: blob:; style-src 'self' 'unsafe-inline' https: data: blob:; script-src 'self' 'wasm-unsafe-eval'; img-src 'self' data: blob: https:; font-src 'self' data: https:; connect-src 'self' https:; media-src 'self' blob: data:; worker-src blob:; frame-src 'self' blob: data: https:; child-src 'self' blob: data: https:;" />
   <title>RRWeb 视频导出</title>
   <link rel="stylesheet" href="./style.css" />
+  <link rel="stylesheet" href="./vendor/rrweb-player/style.css" />
 </head>
 <body>
   <div class="shell">
-    <header class="header">
-      <h1>RRWeb 视频导出</h1>
-      <p class="sub">请选择放有 <span class="mono">*.json</span> 的文件夹，然后开始</p>
-    </header>
+    <nav class="tabs" role="tablist">
+      <button id="tabPolicy" type="button" class="tab active" role="tab" aria-selected="true">保单查询</button>
+      <button id="tabLocal" type="button" class="tab" role="tab" aria-selected="false">本地文件夹</button>
+    </nav>
 
     <div class="body">
-      <div class="controls">
-        <section class="panel">
-          <div class="row">
-            <label class="label">工作文件夹</label>
-            <div class="field grow">
-              <input id="folderPath" type="text" readonly placeholder="未选择" />
-              <button id="pickFolder" type="button" class="btn secondary">浏览…</button>
-            </div>
-          </div>
+      <!-- 保单查询 -->
+      <div id="panelPolicy" class="panel-policy">
+        <div class="policy-layout">
+          <aside class="policy-side">
+            <section class="panel">
+              <div class="row">
+                <label class="label" for="policyUuid">policyUuid</label>
+                <input id="policyUuid" class="input grow" type="text" spellcheck="false" placeholder="至少 32 位" value="" />
+              </div>
+              <div class="actions">
+                <button id="searchBtn" type="button" class="btn primary">查询轨迹</button>
+              </div>
+            </section>
 
-          <div class="row">
-            <label class="label" for="mergedName">合并文件名</label>
-            <input id="mergedName" class="input grow" type="text" value="" spellcheck="false" placeholder="选择文件夹后与文件夹同名" />
-          </div>
-          <p class="hint">导出完成后自动按 JSON 顺序合并为一个 MP4；失败的片段会跳过。</p>
+            <section class="panel export-panel">
+              <h3 class="panel-title">导出设置</h3>
+              <div class="row">
+                <label class="label">导出目录</label>
+                <div class="field grow">
+                  <input id="exportDir" type="text" readonly placeholder="未选择" />
+                  <button id="pickExportDir" type="button" class="btn secondary">浏览…</button>
+                </div>
+              </div>
+              <div class="row">
+                <label class="label" for="policyMergedName">合并文件名</label>
+                <input id="policyMergedName" class="input grow" type="text" value="" spellcheck="false" placeholder="查询成功后自动填充，如：保单号_merged.mp4" />
+              </div>
+              <div class="row">
+                <label class="label" for="policyFpsSelect">帧率</label>
+                <select id="policyFpsSelect" class="select">
+                  <option value="10">10 fps（最快）</option>
+                  <option value="15" selected>15 fps（推荐）</option>
+                  <option value="24">24 fps（原始）</option>
+                </select>
+              </div>
+              <div class="row">
+                <label class="label" for="policyParallelSelect">并发数</label>
+                <select id="policyParallelSelect" class="select">
+                  <option value="1">1</option>
+                  <option value="2" selected>2（推荐）</option>
+                  <option value="4">4</option>
+                </select>
+              </div>
+              <div class="actions export-actions">
+                <button id="exportAllBtn" type="button" class="btn primary" disabled>导出全部 MP4</button>
+                <p class="export-hint">查询成功后可导出；未选目录时点击按钮会弹出选择</p>
+              </div>
+            </section>
 
-          <div class="row">
-            <label class="label" for="fpsSelect">帧率</label>
-            <select id="fpsSelect" class="select">
-              <option value="10">10 fps（最快）</option>
-              <option value="15" selected>15 fps（推荐）</option>
-              <option value="24">24 fps（原始）</option>
-            </select>
-          </div>
-          <div class="row">
-            <label class="label" for="parallelSelect">并发数</label>
-            <select id="parallelSelect" class="select">
-              <option value="1">1</option>
-              <option value="2" selected>2（推荐）</option>
-              <option value="4">4</option>
-            </select>
-          </div>
+            <section id="policyProgressWrap" class="progress-wrap is-idle" aria-live="polite">
+              <div class="progress-head">
+                <span id="policyProgressPhase" class="progress-phase">待机</span>
+                <span id="policyProgressFraction" class="progress-fraction"></span>
+              </div>
+              <progress id="policyProgressBar" max="1" value="0"></progress>
+              <div id="policyProgressDetail" class="progress-detail"></div>
+            </section>
+          </aside>
 
-          <div class="actions">
-            <button id="startBtn" type="button" class="btn primary" disabled>开始</button>
+          <div class="policy-main">
+            <section class="trajectory-list-wrap panel">
+              <div class="list-head">
+                <h3 class="panel-title">操作轨迹列表</h3>
+                <span id="trajectoryCount" class="list-meta"></span>
+              </div>
+              <div id="trajectoryEmpty" class="empty-hint">输入 policyUuid 后点击「查询轨迹」</div>
+              <div id="trajectoryTableWrap" class="table-wrap hidden">
+                <table class="trajectory-table">
+                  <thead>
+                    <tr>
+                      <th>页面</th>
+                      <th>时间</th>
+                      <th>视频时长</th>
+                      <th>状态</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="trajectoryBody"></tbody>
+                </table>
+              </div>
+            </section>
           </div>
-        </section>
+        </div>
 
-        <section id="progressWrap" class="progress-wrap is-idle" aria-live="polite">
-          <div class="progress-head">
-            <span id="progressPhase" class="progress-phase">待机</span>
-            <span id="progressFraction" class="progress-fraction"></span>
-          </div>
-          <progress id="progressBar" max="1" value="0"></progress>
-          <div id="progressDetail" class="progress-detail"></div>
+        <section class="log-wrap policy-log">
+          <div class="log-head">日志</div>
+          <pre id="policyLogBox" class="log"></pre>
         </section>
       </div>
 
-      <section class="log-wrap">
-        <div class="log-head">日志</div>
-        <pre id="logBox" class="log"></pre>
-      </section>
+      <!-- 本地文件夹 -->
+      <div id="panelLocal" class="panel-local hidden">
+        <div class="controls">
+          <section class="panel">
+            <div class="row">
+              <label class="label">工作文件夹</label>
+              <div class="field grow">
+                <input id="folderPath" type="text" readonly placeholder="未选择" />
+                <button id="pickFolder" type="button" class="btn secondary">浏览…</button>
+              </div>
+            </div>
+
+            <div class="row">
+              <label class="label" for="mergedName">合并文件名</label>
+              <input id="mergedName" class="input grow" type="text" value="" spellcheck="false" placeholder="选择文件夹后与文件夹同名" />
+            </div>
+            <p class="hint">导出完成后自动按 JSON 顺序合并为一个 MP4；失败的片段会跳过。</p>
+
+            <div class="row">
+              <label class="label" for="fpsSelect">帧率</label>
+              <select id="fpsSelect" class="select">
+                <option value="10">10 fps（最快）</option>
+                <option value="15" selected>15 fps（推荐）</option>
+                <option value="24">24 fps（原始）</option>
+              </select>
+            </div>
+            <div class="row">
+              <label class="label" for="parallelSelect">并发数</label>
+              <select id="parallelSelect" class="select">
+                <option value="1">1</option>
+                <option value="2" selected>2（推荐）</option>
+                <option value="4">4</option>
+              </select>
+            </div>
+
+            <div class="actions">
+              <button id="startBtn" type="button" class="btn primary" disabled>开始</button>
+            </div>
+          </section>
+
+          <section id="progressWrap" class="progress-wrap is-idle" aria-live="polite">
+            <div class="progress-head">
+              <span id="progressPhase" class="progress-phase">待机</span>
+              <span id="progressFraction" class="progress-fraction"></span>
+            </div>
+            <progress id="progressBar" max="1" value="0"></progress>
+            <div id="progressDetail" class="progress-detail"></div>
+          </section>
+        </div>
+
+        <section class="log-wrap">
+          <div class="log-head">日志</div>
+          <pre id="logBox" class="log"></pre>
+        </section>
+      </div>
     </div>
   </div>
+
+  <!-- 轨迹回放弹框 -->
+  <div id="playerModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="playerTitle">
+    <div id="playerModalBackdrop" class="modal-backdrop"></div>
+    <div class="modal-panel">
+      <header class="modal-head">
+        <h3 id="playerTitle" class="modal-title">轨迹回放</h3>
+        <button id="playerModalClose" type="button" class="modal-close" aria-label="关闭">×</button>
+      </header>
+      <div id="playerHost" class="player-host"></div>
+    </div>
+  </div>
+
+  <script src="./vendor/rrweb-player/rrweb-player.bundle.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>
