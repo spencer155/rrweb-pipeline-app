@@ -7,7 +7,7 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "postinstall": "mkdir -p renderer/vendor/rrweb-player && cp node_modules/bxs-rrweb-player-2/dist/style.css node_modules/bxs-rrweb-player-2/dist/index.js renderer/vendor/rrweb-player/ && cp node_modules/bxs-rrweb-player-2/dist/index.js renderer/vendor/rrweb-player/rrweb-player.bundle.js",
+    "postinstall": "node scripts/postinstall-copy-player.cjs",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
     "dist:arm64": "electron-builder --mac --arm64",
@@ -18,7 +18,7 @@
     "bxs-rrweb-player-2": "^1.0.1",
     "ffmpeg-static": "^5.2.0",
     "pako": "^0.2.9",
-    "rrvideo": "file:vendor/rrvideo-0.2.1.tgz"
+    "rrvideo": "file:vendor/local-rrvideo"
   },
   "devDependencies": {
     "electron": "^28.3.3",

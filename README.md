@@ -47,24 +47,15 @@
 npm install
 ```
 
-项目依赖 `vendor/rrvideo-0.2.1.tgz` 这个本地包，请确保该文件存在后再安装依赖。
+项目依赖 `vendor/local-rrvideo` 目录中的本地 `rrvideo` 包（`package.json` 中为 `file:vendor/local-rrvideo`），请确保该目录及其 `build/` 产物存在后再安装依赖。
 
 ## 本地 rrvideo 包说明
 
-`vendor/rrvideo-0.2.1.tgz` 是从 `local-rrvideo` 项目打包出来的本地依赖包，当前项目通过 `package.json` 中的 `file:vendor/rrvideo-0.2.1.tgz` 引用它。
+`vendor/local-rrvideo` 是 vendored 的 `rrvideo@0.2.1` 源码目录，已包含编译后的 `build/` 输出，可直接被 npm 以 `file:` 协议引用，无需再维护 `.tgz` 与 integrity 校验。
 
-当 `local-rrvideo` 有代码变更时，需要在 `local-rrvideo` 项目中重新打包，并将新的 `.tgz` 文件复制到当前项目的 `vendor/` 目录。如果文件名或版本号发生变化，需要同步更新当前项目 `package.json` 中的 `rrvideo` 依赖路径，然后重新安装依赖。
-
-常见更新流程：
+当 `local-rrvideo` 有代码变更时，在源项目中重新 `npm run build` 后，将 `build/`（及必要的 `package.json`）同步到本项目的 `vendor/local-rrvideo/`，然后重新安装依赖：
 
 ```bash
-# 在 local-rrvideo 项目中执行
-npm pack
-
-# 将生成的 rrvideo-*.tgz 复制到本项目 vendor/ 目录
-# 如文件名变化，同步修改 package.json 中的 rrvideo 依赖路径
-
-# 回到本项目重新安装依赖
 npm install
 ```
 
