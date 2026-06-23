@@ -91,7 +91,7 @@ body {
 }
 
 .policy-side {
-  width: 360px;
+  width: 440px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;

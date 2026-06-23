@@ -184,7 +184,42 @@ function spawnNodeCli({ rrvideoRoot, cliPath, args, envExtra, onData }) {
   });
 }
 
-function runFfmpegConcat({ workDir, listFile, outputAbs }) {
+function buildMergeVideoEncodeArgs(ffmpegConfig, fps) {
+  const codec = String(ffmpegConfig.codec || "libx264");
+  const frameRate = Math.max(1, Number(fps) || 15);
+  const gop = Math.max(1, Math.round(frameRate));
+  const args = ["-c:v", codec];
+
+  if (codec === "libx264" || codec === "libx265") {
+    args.push(
+      "-preset", String(ffmpegConfig.preset != null ? ffmpegConfig.preset : "faster"),
+      "-crf", String(ffmpegConfig.crf != null ? ffmpegConfig.crf : 23),
+      "-g", String(gop),
+      "-keyint_min", String(gop),
+      "-sc_threshold", "0",
+    );
+  } else if (codec === "h264_videotoolbox") {
+    args.push(
+      "-b:v", String(ffmpegConfig.bitrate != null ? ffmpegConfig.bitrate : "4M"),
+      "-g", String(gop),
+    );
+  } else if (ffmpegConfig.bitrate) {
+    args.push("-b:v", String(ffmpegConfig.bitrate), "-g", String(gop));
+  }
+
+  args.push("-pix_fmt", String(ffmpegConfig.pixFmt || "yuv420p"));
+  args.push("-r", String(frameRate));
+  args.push("-vsync", "cfr");
+  args.push("-movflags", "+faststart");
+
+  if (Array.isArray(ffmpegConfig.extraArgs) && ffmpegConfig.extraArgs.length) {
+    args.push(...ffmpegConfig.extraArgs.map(String));
+  }
+
+  return args;
+}
+
+function runFfmpegConcat({ workDir, listFile, outputAbs, ffmpegConfig, fps }) {
   return new Promise((resolve, reject) => {
     const effectiveFfmpegBinary = getEffectiveFfmpegBinaryPath();
     if (!effectiveFfmpegBinary) {
@@ -193,10 +228,12 @@ function runFfmpegConcat({ workDir, listFile, outputAbs }) {
     }
     const child = spawn(effectiveFfmpegBinary, [
       "-y",
+      "-hide_banner",
+      "-loglevel", "warning",
       "-f", "concat",
       "-safe", "0",
       "-i", listFile,
-      "-c", "copy",
+      ...buildMergeVideoEncodeArgs(ffmpegConfig, fps),
       outputAbs,
     ], { cwd: workDir });
 
@@ -524,7 +561,7 @@ async function runPipeline(win, opts) {
         .join("\n");
       await fsp.writeFile(listPath, `${lines}\n`, "utf8");
 
-      logTo(win, `按 JSON 顺序合并 ${clipAbsOrdered.length} 段 → ${outName}`);
+      logTo(win, `按 JSON 顺序合并 ${clipAbsOrdered.length} 段 → ${outName}（重新编码以修正时间轴）`);
       progressTo(win, {
         completed: jsonFiles.length,
         total: totalSteps,
@@ -532,7 +569,13 @@ async function runPipeline(win, opts) {
         currentFile: outName,
       });
       try {
-        await runFfmpegConcat({ workDir, listFile: listPath, outputAbs });
+        await runFfmpegConcat({
+          workDir,
+          listFile: listPath,
+          outputAbs,
+          ffmpegConfig: effectiveConfig.ffmpeg,
+          fps: effectiveConfig.fps,
+        });
         logTo(win, `合并完成：${outputAbs}`);
       } finally {
         await fsp.unlink(listPath).catch(() => {});
@@ -706,8 +749,8 @@ ipcMain.handle("export-trajectory", async (_e, payload) => {
     if (!lastTrajectoryCache?.items?.length) {
       throw new Error("请先查询保单轨迹");
     }
-    const outputDir = payload.outputDir;
-    if (!outputDir) {
+    const baseDir = payload.outputDir;
+    if (!baseDir) {
       throw new Error("请选择导出目录");
     }
     const exportable = lastTrajectoryCache.items.filter(
@@ -717,13 +760,18 @@ ipcMain.handle("export-trajectory", async (_e, payload) => {
       throw new Error("没有可导出的轨迹片段（事件数据为空或解析失败）");
     }
 
+    const policyUuid = String(lastTrajectoryCache.policyUuid || "").trim();
+    const safeFolderName = policyUuid.replace(/[/\\:?*"|<>]/gu, "_") || "trajectory";
+    const workDir = path.join(baseDir, safeFolderName);
+    await fsp.mkdir(workDir, { recursive: true });
+
     const mergedBase = payload.mergedFileName && payload.mergedFileName.trim()
       ? payload.mergedFileName.trim().replace(/\.mp4$/iu, "")
-      : `${lastTrajectoryCache.policyNo || "trajectory"}_merged`;
+      : `${lastTrajectoryCache.policyNo || safeFolderName}_merged`;
     const mergedFileName = `${mergedBase}.mp4`;
 
     const result = await runPipeline(win, {
-      workDir: outputDir,
+      workDir,
       items: exportable,
       cleanupJson: true,
       mergeVideos: payload.mergeVideos !== false,
@@ -731,8 +779,8 @@ ipcMain.handle("export-trajectory", async (_e, payload) => {
       fps: payload.fps,
       parallel: payload.parallel,
     });
-    await setExportDir(app, outputDir);
-    return { success: true, result, outputDir };
+    await setExportDir(app, baseDir);
+    return { success: true, result, outputDir: workDir, baseDir };
   } catch (error) {
     return {
       success: false,
