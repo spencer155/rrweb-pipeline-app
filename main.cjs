@@ -6,11 +6,58 @@ const os = require("os");
 const { spawn } = require("child_process");
 
 const ffmpegBinary = require("ffmpeg-static");
-const { queryTrajectory } = require("./lib/trajectory-service.cjs");
+const { queryTrajectory, sanitizeExportName } = require("./lib/trajectory-service.cjs");
 const { getExportDir, setExportDir } = require("./lib/user-prefs.cjs");
 
 /** 最近一次保单查询的完整轨迹（含 events），供预览与导出 */
 let lastTrajectoryCache = null;
+
+class PipelineAbortError extends Error {
+  constructor() {
+    super("导出已取消");
+    this.name = "PipelineAbortError";
+  }
+}
+
+/** @type {{ aborted: boolean; children: Set<import('child_process').ChildProcess>; running: boolean } | null} */
+let activePipelineSession = null;
+
+function beginPipelineSession() {
+  if (activePipelineSession?.running) {
+    throw new Error("已有导出任务进行中");
+  }
+  const session = {
+    aborted: false,
+    children: new Set(),
+    running: true,
+  };
+  activePipelineSession = session;
+  return session;
+}
+
+function endPipelineSession(session) {
+  session.running = false;
+  if (activePipelineSession === session) {
+    activePipelineSession = null;
+  }
+}
+
+function cancelActivePipeline() {
+  if (!activePipelineSession?.running) return false;
+  activePipelineSession.aborted = true;
+  for (const child of activePipelineSession.children) {
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // ignore
+    }
+  }
+  return true;
+}
+
+function isPipelineAborted(session) {
+  return Boolean(session && session.aborted);
+}
 
 const SKIP_JSON = new Set([
   "package.json",
@@ -131,8 +178,13 @@ function progressTo(win, state) {
   }
 }
 
-function spawnNodeCli({ rrvideoRoot, cliPath, args, envExtra, onData }) {
+function spawnNodeCli({ rrvideoRoot, cliPath, args, envExtra, onData, session }) {
   return new Promise((resolve, reject) => {
+    if (isPipelineAborted(session)) {
+      reject(new PipelineAbortError());
+      return;
+    }
+
     const nodePathEntries = [];
     if (app.isPackaged) {
       nodePathEntries.push(
@@ -167,6 +219,7 @@ function spawnNodeCli({ rrvideoRoot, cliPath, args, envExtra, onData }) {
       cwd: rrvideoRoot,
       env,
     });
+    session?.children.add(child);
 
     let stderr = "";
     child.stdout.setEncoding("utf8");
@@ -176,8 +229,16 @@ function spawnNodeCli({ rrvideoRoot, cliPath, args, envExtra, onData }) {
       stderr += String(c);
       onData && onData(String(c), "stderr");
     });
-    child.on("error", reject);
+    child.on("error", (err) => {
+      session?.children.delete(child);
+      reject(err);
+    });
     child.on("close", (code) => {
+      session?.children.delete(child);
+      if (isPipelineAborted(session)) {
+        reject(new PipelineAbortError());
+        return;
+      }
       if (code === 0) resolve();
       else reject(new Error(stderr.trim() || `进程退出码 ${code}`));
     });
@@ -219,8 +280,12 @@ function buildMergeVideoEncodeArgs(ffmpegConfig, fps) {
   return args;
 }
 
-function runFfmpegConcat({ workDir, listFile, outputAbs, ffmpegConfig, fps }) {
+function runFfmpegConcat({ workDir, listFile, outputAbs, ffmpegConfig, fps, session }) {
   return new Promise((resolve, reject) => {
+    if (isPipelineAborted(session)) {
+      reject(new PipelineAbortError());
+      return;
+    }
     const effectiveFfmpegBinary = getEffectiveFfmpegBinaryPath();
     if (!effectiveFfmpegBinary) {
       reject(new Error("未找到 ffmpeg 可执行文件（ffmpeg-static）"));
@@ -236,12 +301,21 @@ function runFfmpegConcat({ workDir, listFile, outputAbs, ffmpegConfig, fps }) {
       ...buildMergeVideoEncodeArgs(ffmpegConfig, fps),
       outputAbs,
     ], { cwd: workDir });
+    session?.children.add(child);
 
     let err = "";
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (c) => { err += String(c); });
-    child.on("error", reject);
+    child.on("error", (error) => {
+      session?.children.delete(child);
+      reject(error);
+    });
     child.on("close", (code) => {
+      session?.children.delete(child);
+      if (isPipelineAborted(session)) {
+        reject(new PipelineAbortError());
+        return;
+      }
       if (code === 0) resolve();
       else {
         reject(
@@ -312,6 +386,210 @@ async function detectFastCodec() {
   return _fastCodecCache;
 }
 
+function clipBaseNameForItem(item, seqFallback) {
+  const seq = item.index != null && Number.isFinite(Number(item.index))
+    ? Number(item.index) + 1
+    : seqFallback;
+  const safePageId = String(item.pageId || "page").replace(/[/\\:?*"|<>]/gu, "_");
+  return `${String(seq).padStart(3, "0")}_${safePageId}`;
+}
+
+/** 用 ffmpeg 检查文件是否可读；短片段（1～5 秒）导出后时长可能仅零点几秒，以能否解码为准，不按最短时长拦截 */
+function probeVideoFile(absPath) {
+  if (!fs.existsSync(absPath)) {
+    return Promise.resolve({ valid: false, error: "文件不存在" });
+  }
+  const stat = fs.statSync(absPath);
+  if (stat.size === 0) {
+    return Promise.resolve({ valid: false, error: "文件为空（0 字节）" });
+  }
+  const effectiveFfmpegBinary = getEffectiveFfmpegBinaryPath();
+  if (!effectiveFfmpegBinary) {
+    return Promise.resolve({ valid: false, error: "ffmpeg 不可用" });
+  }
+  return new Promise((resolve) => {
+    const child = spawn(effectiveFfmpegBinary, [
+      "-hide_banner",
+      "-v", "error",
+      "-i", absPath,
+      "-f", "null", "-",
+    ]);
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (c) => { stderr += String(c); });
+    child.on("close", (code) => {
+      if (code !== 0) {
+        resolve({
+          valid: false,
+          error: stderr.trim() || `无法读取视频（退出码 ${code}）`,
+        });
+        return;
+      }
+      let durationSec = null;
+      const m = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/u);
+      if (m) {
+        durationSec = parseInt(m[1], 10) * 3600
+          + parseInt(m[2], 10) * 60
+          + parseFloat(m[3]);
+        if (!Number.isFinite(durationSec)) durationSec = null;
+      }
+      resolve({ valid: true, size: stat.size, durationSec });
+    });
+    child.on("error", (e) => resolve({ valid: false, error: e.message || String(e) }));
+  });
+}
+
+async function collectValidatedClips(win, workDir, items, mergedFileName) {
+  const exportable = items.filter(
+    (item) => !item.error && item.durationMs > 0 && item.events && item.events.length,
+  );
+  if (!exportable.length) {
+    throw new Error("没有可合并的轨迹片段");
+  }
+
+  let outName = mergedFileName && mergedFileName.trim() ? mergedFileName.trim() : "merged.mp4";
+  if (!outName.toLowerCase().endsWith(".mp4")) outName += ".mp4";
+  const outputAbs = path.resolve(path.join(workDir, outName));
+
+  logTo(win, `校验 ${exportable.length} 个片段视频…`);
+  const clips = [];
+  const errors = [];
+  const warnings = [];
+  let seqFallback = 0;
+
+  for (const item of exportable) {
+    seqFallback += 1;
+    const base = clipBaseNameForItem(item, seqFallback);
+    const mp4Name = `${base}.mp4`;
+    const abs = path.resolve(path.join(workDir, mp4Name));
+    const pageLabel = item.pageDesc || item.pageId || base;
+
+    const probe = await probeVideoFile(abs);
+    if (!probe.valid) {
+      errors.push(`${pageLabel}（${mp4Name}）：${probe.error}`);
+      continue;
+    }
+
+    if (abs === outputAbs) {
+      warnings.push(`${mp4Name} 与合并输出文件名相同，已跳过`);
+      continue;
+    }
+
+    let durText;
+    if (probe.durationSec != null) {
+      durText = `${probe.durationSec.toFixed(2)}s`;
+    } else {
+      durText = `可读，${Math.max(1, Math.round(probe.size / 1024))}KB`;
+    }
+    logTo(win, `✓ ${mp4Name}（${pageLabel}，${durText}）`);
+    clips.push(abs);
+  }
+
+  for (const w of warnings) {
+    logTo(win, `⚠ ${w}`);
+  }
+
+  if (errors.length) {
+    throw new Error(`视频校验未通过：\n${errors.join("\n")}`);
+  }
+  if (!clips.length) {
+    throw new Error("没有通过校验的片段可合并");
+  }
+
+  return { clips, outName, outputAbs };
+}
+
+async function runMergeOnly(win, opts) {
+  const {
+    workDir,
+    items,
+    mergedFileName,
+    session = null,
+  } = opts;
+  const fps = Number.isFinite(Number(opts.fps)) && Number(opts.fps) > 0
+    ? Number(opts.fps) : 15;
+
+  if (!getEffectiveFfmpegBinaryPath()) {
+    throw new Error("ffmpeg-static 不可用");
+  }
+
+  const { clips, outName, outputAbs } = await collectValidatedClips(
+    win,
+    workDir,
+    items,
+    mergedFileName,
+  );
+
+  const baseFfmpeg = await detectFastCodec();
+  const effectiveConfig = {
+    fps,
+    ffmpeg: baseFfmpeg,
+  };
+
+  const totalSteps = 1;
+  progressTo(win, {
+    completed: 0,
+    total: totalSteps,
+    phase: "merge",
+    currentFile: outName,
+  });
+
+  const listPath = path.join(workDir, `.merge_filelist.${process.pid}.txt`);
+  const lines = clips
+    .map((absP) => {
+      const esc = absP.replace(/'/gu, `'\\''`);
+      return `file '${esc}'`;
+    })
+    .join("\n");
+  await fsp.writeFile(listPath, `${lines}\n`, "utf8");
+
+  logTo(win, `按轨迹顺序合并 ${clips.length} 段 → ${outName}（重新编码以修正时间轴）`);
+  try {
+    await runFfmpegConcat({
+      workDir,
+      listFile: listPath,
+      outputAbs,
+      ffmpegConfig: effectiveConfig.ffmpeg,
+      fps: effectiveConfig.fps,
+      session,
+    });
+    logTo(win, `合并完成：${outputAbs}`);
+  } catch (e) {
+    if (e instanceof PipelineAbortError || isPipelineAborted(session)) {
+      logTo(win, "--- 合并已取消 ---");
+      progressTo(win, {
+        completed: 0,
+        total: totalSteps,
+        phase: "done",
+        currentFile: null,
+      });
+      return {
+        cancelled: true,
+        mergedPath: null,
+        clipCount: clips.length,
+        finalProgress: { phase: "done", completed: 0, total: totalSteps },
+      };
+    }
+    throw e;
+  } finally {
+    await fsp.unlink(listPath).catch(() => {});
+  }
+
+  progressTo(win, {
+    completed: totalSteps,
+    total: totalSteps,
+    phase: "done",
+    currentFile: null,
+  });
+
+  return {
+    cancelled: false,
+    mergedPath: outputAbs,
+    clipCount: clips.length,
+    finalProgress: { phase: "done", completed: totalSteps, total: totalSteps },
+  };
+}
+
 async function writeTrajectoryJsonFiles(workDir, items) {
   await fsp.mkdir(workDir, { recursive: true });
   const writtenFiles = [];
@@ -319,8 +597,7 @@ async function writeTrajectoryJsonFiles(workDir, items) {
   for (const item of items) {
     if (!item.events || !item.events.length) continue;
     seq += 1;
-    const safePageId = String(item.pageId || "page").replace(/[/\\:?*"|<>]/gu, "_");
-    const name = `${String(seq).padStart(3, "0")}_${safePageId}.json`;
+    const name = `${clipBaseNameForItem(item, seq)}.json`;
     await fsp.writeFile(
       path.join(workDir, name),
       JSON.stringify(item.events),
@@ -335,7 +612,14 @@ async function writeTrajectoryJsonFiles(workDir, items) {
 }
 
 async function runPipeline(win, opts) {
-  const { workDir, mergeVideos, mergedFileName, items, cleanupJson = false } = opts;
+  const {
+    workDir,
+    mergeVideos,
+    mergedFileName,
+    items,
+    cleanupJson = false,
+    session = null,
+  } = opts;
   const fps = Number.isFinite(Number(opts.fps)) && Number(opts.fps) > 0
     ? Number(opts.fps) : 15;
   const parallel = [1, 2, 4].includes(Number(opts.parallel))
@@ -427,11 +711,17 @@ async function runPipeline(win, opts) {
 
   let ok = 0;
   let fail = 0;
+  let cancelled = false;
   /** JSON 文件名 → 成功时对应的 mp4 文件名（用于合并时按扫描顺序串联） */
   const successOutNameByJson = new Map();
+  const failedJsonBases = new Set();
   let convertFinishedCount = 0;
 
   async function convertOne(base) {
+    if (isPipelineAborted(session)) {
+      cancelled = true;
+      return;
+    }
     const inputAbs = path.join(workDir, base);
     const outName = `${path.basename(base, path.extname(base))}.mp4`;
     const outputAbs = path.join(workDir, outName);
@@ -453,6 +743,7 @@ async function runPipeline(win, opts) {
         cliPath,
         args,
         envExtra: {},
+        session,
         onData: (chunk, stream) => {
           const trimmed = chunk.replace(/\s+$/u, "");
           if (trimmed) logTo(win, `[${stream}] ${trimmed}`);
@@ -465,7 +756,15 @@ async function runPipeline(win, opts) {
         progressTo(win, { itemIndex, itemStatus: "success" });
       }
     } catch (e) {
+      if (e instanceof PipelineAbortError || isPipelineAborted(session)) {
+        cancelled = true;
+        if (itemIndex != null) {
+          progressTo(win, { itemIndex, itemStatus: "cancelled" });
+        }
+        return;
+      }
       fail += 1;
+      failedJsonBases.add(base);
       logTo(win, `失败：${base}`);
       logTo(win, String(e.message || e));
       if (itemIndex != null) {
@@ -488,11 +787,21 @@ async function runPipeline(win, opts) {
       let running = 0;
 
       function schedule() {
-        while (running < parallel && nextIdx < jsonFiles.length) {
+        if (isPipelineAborted(session)) {
+          cancelled = true;
+          if (running === 0) resolve();
+          return;
+        }
+        while (running < parallel && nextIdx < jsonFiles.length && !isPipelineAborted(session)) {
           const f = jsonFiles[nextIdx++];
           running += 1;
           convertOne(f).finally(() => {
             running -= 1;
+            if (isPipelineAborted(session)) {
+              cancelled = true;
+              if (running === 0) resolve();
+              return;
+            }
             if (nextIdx < jsonFiles.length) {
               schedule();
             } else if (running === 0) {
@@ -506,6 +815,33 @@ async function runPipeline(win, opts) {
       schedule();
     });
 
+    if (cancelled || isPipelineAborted(session)) {
+      for (const base of jsonFiles) {
+        const itemIndex = itemIndexByJson.get(base);
+        if (itemIndex == null) continue;
+        if (successOutNameByJson.has(base) || failedJsonBases.has(base)) continue;
+        progressTo(win, { itemIndex, itemStatus: "cancelled" });
+      }
+      logTo(win, `--- 导出已取消：成功 ${ok}，失败 ${fail}`);
+      progressTo(win, {
+        completed: convertFinishedCount,
+        total: totalSteps,
+        phase: "done",
+        currentFile: null,
+      });
+      return {
+        ok,
+        fail,
+        cancelled: true,
+        mergedPath: null,
+        finalProgress: {
+          phase: "done",
+          completed: convertFinishedCount,
+          total: totalSteps,
+        },
+      };
+    }
+
     logTo(win, `--- 导出结束：成功 ${ok}，失败 ${fail}`);
 
     if (!mergeVideos) {
@@ -517,7 +853,7 @@ async function runPipeline(win, opts) {
       });
     }
 
-    if (mergeVideos) {
+    if (mergeVideos && !isPipelineAborted(session)) {
       let outName =
         mergedFileName && mergedFileName.trim()
           ? mergedFileName.trim()
@@ -575,8 +911,31 @@ async function runPipeline(win, opts) {
           outputAbs,
           ffmpegConfig: effectiveConfig.ffmpeg,
           fps: effectiveConfig.fps,
+          session,
         });
         logTo(win, `合并完成：${outputAbs}`);
+      } catch (e) {
+        if (e instanceof PipelineAbortError || isPipelineAborted(session)) {
+          logTo(win, "--- 合并已取消 ---");
+          progressTo(win, {
+            completed: jsonFiles.length,
+            total: totalSteps,
+            phase: "done",
+            currentFile: null,
+          });
+          return {
+            ok,
+            fail,
+            cancelled: true,
+            mergedPath: null,
+            finalProgress: {
+              phase: "done",
+              completed: jsonFiles.length,
+              total: totalSteps,
+            },
+          };
+        }
+        throw e;
       } finally {
         await fsp.unlink(listPath).catch(() => {});
       }
@@ -649,26 +1008,40 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-ipcMain.handle("select-folder", async () => {
-  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
-    properties: ["openDirectory"],
-  });
-  if (canceled || !filePaths[0]) return null;
-  return filePaths[0];
-});
-
-ipcMain.handle("run-pipeline", async (_e, payload) => {
-  const win = BrowserWindow.fromWebContents(_e.sender);
-  try {
-    const result = await runPipeline(win, payload);
-    return { success: true, result };
-  } catch (error) {
-    return {
-      success: false,
-      error: error.message || String(error),
-    };
+function resolveExportableItems(cache, itemIndices) {
+  const all = cache.items.filter((item) => item.events && item.events.length);
+  if (!Array.isArray(itemIndices) || !itemIndices.length) return all;
+  const picked = [];
+  for (const rawIdx of itemIndices) {
+    const item = cache.items[Number(rawIdx)];
+    if (item && item.events && item.events.length) {
+      picked.push(item);
+    }
   }
-});
+  if (!picked.length) {
+    throw new Error("所选片段无可导出数据");
+  }
+  return picked;
+}
+
+async function buildTrajectoryExportContext(cache, baseDir, payload) {
+  const exportKey = String(
+    cache.exportKey
+    || cache.videoAuditToken
+    || cache.policyUuid
+    || "",
+  ).trim();
+  const safeFolderName = sanitizeExportName(exportKey);
+  const workDir = path.join(baseDir, safeFolderName);
+  await fsp.mkdir(workDir, { recursive: true });
+
+  const mergedBase = payload.mergedFileName && payload.mergedFileName.trim()
+    ? payload.mergedFileName.trim().replace(/\.mp4$/iu, "")
+    : `${cache.policyNo || safeFolderName}_merged`;
+  const mergedFileName = `${mergedBase}.mp4`;
+
+  return { workDir, mergedFileName, baseDir, safeFolderName };
+}
 
 ipcMain.handle("query-trajectory", async (e, payload) => {
   const win = BrowserWindow.fromWebContents(e.sender);
@@ -681,6 +1054,9 @@ ipcMain.handle("query-trajectory", async (e, payload) => {
       result: {
         policyNo: result.policyNo,
         policyUuid: result.policyUuid,
+        videoAuditToken: result.videoAuditToken,
+        exportKey: result.exportKey,
+        queryMode: result.queryMode,
         items: result.items.map((item) => ({
           index: item.index,
           pageId: item.pageId,
@@ -743,8 +1119,13 @@ ipcMain.handle("select-output-folder", async () => {
   return filePaths[0];
 });
 
-ipcMain.handle("export-trajectory", async (_e, payload) => {
+ipcMain.handle("cancel-export", () => {
+  return { success: cancelActivePipeline() };
+});
+
+ipcMain.handle("merge-trajectory", async (_e, payload) => {
   const win = BrowserWindow.fromWebContents(_e.sender);
+  const session = beginPipelineSession();
   try {
     if (!lastTrajectoryCache?.items?.length) {
       throw new Error("请先查询保单轨迹");
@@ -753,31 +1134,61 @@ ipcMain.handle("export-trajectory", async (_e, payload) => {
     if (!baseDir) {
       throw new Error("请选择导出目录");
     }
-    const exportable = lastTrajectoryCache.items.filter(
-      (item) => item.events && item.events.length,
+    const { workDir, mergedFileName } = await buildTrajectoryExportContext(
+      lastTrajectoryCache,
+      baseDir,
+      payload,
     );
-    if (!exportable.length) {
-      throw new Error("没有可导出的轨迹片段（事件数据为空或解析失败）");
+    const result = await runMergeOnly(win, {
+      workDir,
+      items: lastTrajectoryCache.items,
+      mergedFileName,
+      fps: payload.fps,
+      session,
+    });
+    return { success: true, result, outputDir: workDir, baseDir };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message || String(error),
+    };
+  } finally {
+    endPipelineSession(session);
+  }
+});
+
+ipcMain.handle("export-trajectory", async (_e, payload) => {
+  const win = BrowserWindow.fromWebContents(_e.sender);
+  const session = beginPipelineSession();
+  try {
+    if (!lastTrajectoryCache?.items?.length) {
+      throw new Error("请先查询保单轨迹");
     }
+    const baseDir = payload.outputDir;
+    if (!baseDir) {
+      throw new Error("请选择导出目录");
+    }
+    const exportable = resolveExportableItems(lastTrajectoryCache, payload.itemIndices);
+    const { workDir, mergedFileName } = await buildTrajectoryExportContext(
+      lastTrajectoryCache,
+      baseDir,
+      payload,
+    );
 
-    const policyUuid = String(lastTrajectoryCache.policyUuid || "").trim();
-    const safeFolderName = policyUuid.replace(/[/\\:?*"|<>]/gu, "_") || "trajectory";
-    const workDir = path.join(baseDir, safeFolderName);
-    await fsp.mkdir(workDir, { recursive: true });
-
-    const mergedBase = payload.mergedFileName && payload.mergedFileName.trim()
-      ? payload.mergedFileName.trim().replace(/\.mp4$/iu, "")
-      : `${lastTrajectoryCache.policyNo || safeFolderName}_merged`;
-    const mergedFileName = `${mergedBase}.mp4`;
+    const isSingleExport = Array.isArray(payload.itemIndices) && payload.itemIndices.length > 0;
+    const mergeVideos = isSingleExport
+      ? payload.mergeVideos === true
+      : payload.mergeVideos !== false;
 
     const result = await runPipeline(win, {
       workDir,
       items: exportable,
       cleanupJson: true,
-      mergeVideos: payload.mergeVideos !== false,
+      mergeVideos,
       mergedFileName,
       fps: payload.fps,
       parallel: payload.parallel,
+      session,
     });
     await setExportDir(app, baseDir);
     return { success: true, result, outputDir: workDir, baseDir };
@@ -786,5 +1197,7 @@ ipcMain.handle("export-trajectory", async (_e, payload) => {
       success: false,
       error: error.message || String(error),
     };
+  } finally {
+    endPipelineSession(session);
   }
 });
