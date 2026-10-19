@@ -1,6 +1,6 @@
 {
   "name": "rrweb-pipeline",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "将 rrweb JSON 导出为 MP4 并可选合并",
   "main": "main.cjs",
   "author": "sun",
