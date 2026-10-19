@@ -43,6 +43,40 @@ body {
   flex-direction: column;
 }
 
+.mode-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+
+.mode-tab {
+  border: 1px solid #dfe3ee;
+  background: #fff;
+  color: #3a4252;
+  border-radius: 10px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.mode-tab.is-active {
+  background: linear-gradient(160deg, #4f67ff, #3947f5);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 8px 18px rgba(57, 71, 245, 0.22);
+}
+
+.mode-tab:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.json-name {
+  word-break: break-all;
+}
+
 .policy-layout {
   display: flex;
   gap: 16px;
@@ -231,6 +265,32 @@ body {
   font-weight: 600;
   color: #4b5260;
   z-index: 1;
+}
+
+.trajectory-table .col-check {
+  width: 40px;
+  text-align: center;
+  padding-left: 10px;
+  padding-right: 6px;
+}
+
+.trajectory-table td.col-check {
+  text-align: center;
+  padding-left: 10px;
+  padding-right: 6px;
+}
+
+.trajectory-table .col-check input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: #3947f5;
+}
+
+.trajectory-table .col-check input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .trajectory-table tr:hover td {

@@ -3,6 +3,11 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("api", {
   selectOutputFolder: () => ipcRenderer.invoke("select-output-folder"),
   getSavedExportDir: () => ipcRenderer.invoke("get-export-dir"),
+  selectJsonFolder: () => ipcRenderer.invoke("select-json-folder"),
+  getSavedJsonFolder: () => ipcRenderer.invoke("get-json-folder"),
+  listJsonFiles: (dir) => ipcRenderer.invoke("list-json-files", dir),
+  exportJsonFolder: (payload) => ipcRenderer.invoke("export-json-folder", payload),
+  mergeJsonFolder: (payload) => ipcRenderer.invoke("merge-json-folder", payload),
   queryTrajectory: (payload) => ipcRenderer.invoke("query-trajectory", payload),
   getTrajectoryEvents: (index) => ipcRenderer.invoke("get-trajectory-events", index),
   exportTrajectory: (payload) => ipcRenderer.invoke("export-trajectory", payload),

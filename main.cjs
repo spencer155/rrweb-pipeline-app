@@ -7,7 +7,7 @@ const { spawn } = require("child_process");
 
 const ffmpegBinary = require("ffmpeg-static");
 const { queryTrajectory, sanitizeExportName } = require("./lib/trajectory-service.cjs");
-const { getExportDir, setExportDir } = require("./lib/user-prefs.cjs");
+const { getExportDir, setExportDir, getJsonSourceDir, setJsonSourceDir } = require("./lib/user-prefs.cjs");
 
 /** 最近一次保单查询的完整轨迹（含 events），供预览与导出 */
 let lastTrajectoryCache = null;
@@ -395,51 +395,7 @@ function clipBaseNameForItem(item, seqFallback) {
 }
 
 /** 用 ffmpeg 检查文件是否可读；短片段（1～5 秒）导出后时长可能仅零点几秒，以能否解码为准，不按最短时长拦截 */
-function probeVideoFile(absPath) {
-  if (!fs.existsSync(absPath)) {
-    return Promise.resolve({ valid: false, error: "文件不存在" });
-  }
-  const stat = fs.statSync(absPath);
-  if (stat.size === 0) {
-    return Promise.resolve({ valid: false, error: "文件为空（0 字节）" });
-  }
-  const effectiveFfmpegBinary = getEffectiveFfmpegBinaryPath();
-  if (!effectiveFfmpegBinary) {
-    return Promise.resolve({ valid: false, error: "ffmpeg 不可用" });
-  }
-  return new Promise((resolve) => {
-    const child = spawn(effectiveFfmpegBinary, [
-      "-hide_banner",
-      "-v", "error",
-      "-i", absPath,
-      "-f", "null", "-",
-    ]);
-    let stderr = "";
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (c) => { stderr += String(c); });
-    child.on("close", (code) => {
-      if (code !== 0) {
-        resolve({
-          valid: false,
-          error: stderr.trim() || `无法读取视频（退出码 ${code}）`,
-        });
-        return;
-      }
-      let durationSec = null;
-      const m = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/u);
-      if (m) {
-        durationSec = parseInt(m[1], 10) * 3600
-          + parseInt(m[2], 10) * 60
-          + parseFloat(m[3]);
-        if (!Number.isFinite(durationSec)) durationSec = null;
-      }
-      resolve({ valid: true, size: stat.size, durationSec });
-    });
-    child.on("error", (e) => resolve({ valid: false, error: e.message || String(e) }));
-  });
-}
-
-async function collectValidatedClips(win, workDir, items, mergedFileName) {
+function collectMergeClips(win, workDir, items, mergedFileName) {
   const exportable = items.filter(
     (item) => !item.error && item.durationMs > 0 && item.events && item.events.length,
   );
@@ -451,10 +407,8 @@ async function collectValidatedClips(win, workDir, items, mergedFileName) {
   if (!outName.toLowerCase().endsWith(".mp4")) outName += ".mp4";
   const outputAbs = path.resolve(path.join(workDir, outName));
 
-  logTo(win, `校验 ${exportable.length} 个片段视频…`);
+  logTo(win, `收集 ${exportable.length} 个片段视频…`);
   const clips = [];
-  const errors = [];
-  const warnings = [];
   let seqFallback = 0;
 
   for (const item of exportable) {
@@ -464,39 +418,71 @@ async function collectValidatedClips(win, workDir, items, mergedFileName) {
     const abs = path.resolve(path.join(workDir, mp4Name));
     const pageLabel = item.pageDesc || item.pageId || base;
 
-    const probe = await probeVideoFile(abs);
-    if (!probe.valid) {
-      errors.push(`${pageLabel}（${mp4Name}）：${probe.error}`);
-      continue;
-    }
-
     if (abs === outputAbs) {
-      warnings.push(`${mp4Name} 与合并输出文件名相同，已跳过`);
+      logTo(win, `⚠ ${mp4Name} 与合并输出文件名相同，已跳过`);
       continue;
     }
 
-    let durText;
-    if (probe.durationSec != null) {
-      durText = `${probe.durationSec.toFixed(2)}s`;
-    } else {
-      durText = `可读，${Math.max(1, Math.round(probe.size / 1024))}KB`;
+    if (!fs.existsSync(abs)) {
+      logTo(win, `⚠ ${mp4Name}（${pageLabel}）不存在，已跳过`);
+      continue;
     }
-    logTo(win, `✓ ${mp4Name}（${pageLabel}，${durText}）`);
+
+    logTo(win, `✓ ${mp4Name}（${pageLabel}）`);
     clips.push(abs);
   }
 
-  for (const w of warnings) {
-    logTo(win, `⚠ ${w}`);
-  }
-
-  if (errors.length) {
-    throw new Error(`视频校验未通过：\n${errors.join("\n")}`);
-  }
   if (!clips.length) {
-    throw new Error("没有通过校验的片段可合并");
+    throw new Error("没有找到可合并的片段视频文件");
   }
 
   return { clips, outName, outputAbs };
+}
+
+function collectJsonMp4Clips(win, workDir, jsonFiles, mergedFileName) {
+  if (!jsonFiles.length) {
+    throw new Error("没有可合并的 JSON 文件");
+  }
+
+  let outName = mergedFileName && mergedFileName.trim() ? mergedFileName.trim() : "merged.mp4";
+  if (!outName.toLowerCase().endsWith(".mp4")) outName += ".mp4";
+  const outputAbs = path.resolve(path.join(workDir, outName));
+
+  logTo(win, `收集 ${jsonFiles.length} 个 JSON 对应的视频…`);
+  const clips = [];
+  for (const jsonName of jsonFiles) {
+    const mp4Name = `${path.basename(jsonName, ".json")}.mp4`;
+    const abs = path.resolve(path.join(workDir, mp4Name));
+    if (abs === outputAbs) {
+      logTo(win, `⚠ ${mp4Name} 与合并输出文件名相同，已跳过`);
+      continue;
+    }
+    if (!fs.existsSync(abs)) {
+      logTo(win, `⚠ ${mp4Name} 不存在，已跳过`);
+      continue;
+    }
+    logTo(win, `✓ ${mp4Name}`);
+    clips.push(abs);
+  }
+
+  if (!clips.length) {
+    throw new Error("没有找到可合并的 MP4（需与 JSON 同名，且已生成在同一文件夹）");
+  }
+
+  return { clips, outName, outputAbs };
+}
+
+function resolveWorkdirJsonFiles(workDir, fileNames) {
+  const allFiles = listWorkdirJsonFiles(workDir);
+  if (!Array.isArray(fileNames) || !fileNames.length) return allFiles;
+  const allowed = new Set(fileNames.filter((name) => typeof name === "string"));
+  return allFiles.filter((name) => allowed.has(name));
+}
+
+function assertWorkDir(workDir) {
+  if (!workDir || typeof workDir !== "string" || !fs.existsSync(workDir) || !fs.statSync(workDir).isDirectory()) {
+    throw new Error("请选择包含 JSON 的文件夹");
+  }
 }
 
 async function runMergeOnly(win, opts) {
@@ -513,12 +499,17 @@ async function runMergeOnly(win, opts) {
     throw new Error("ffmpeg-static 不可用");
   }
 
-  const { clips, outName, outputAbs } = await collectValidatedClips(
-    win,
-    workDir,
-    items,
-    mergedFileName,
-  );
+  const collected = Array.isArray(opts.clips)
+    ? {
+      clips: opts.clips,
+      outName: opts.outName,
+      outputAbs: opts.outputAbs,
+    }
+    : collectMergeClips(win, workDir, items, mergedFileName);
+  const { clips, outName, outputAbs } = collected;
+  if (!clips.length) {
+    throw new Error("没有找到可合并的片段视频文件");
+  }
 
   const baseFfmpeg = await detectFastCodec();
   const effectiveConfig = {
@@ -543,7 +534,7 @@ async function runMergeOnly(win, opts) {
     .join("\n");
   await fsp.writeFile(listPath, `${lines}\n`, "utf8");
 
-  logTo(win, `按轨迹顺序合并 ${clips.length} 段 → ${outName}（重新编码以修正时间轴）`);
+  logTo(win, `${opts.mergeLabel || "按轨迹顺序"}合并 ${clips.length} 段 → ${outName}（重新编码以修正时间轴）`);
   try {
     await runFfmpegConcat({
       workDir,
@@ -617,6 +608,7 @@ async function runPipeline(win, opts) {
     mergeVideos,
     mergedFileName,
     items,
+    jsonFileNames = null,
     cleanupJson = false,
     session = null,
   } = opts;
@@ -661,7 +653,7 @@ async function runPipeline(win, opts) {
       jsonFilesToCleanup.map((entry) => [entry.name, entry.itemIndex]),
     );
   } else {
-    jsonFiles = listWorkdirJsonFiles(workDir);
+    jsonFiles = resolveWorkdirJsonFiles(workDir, jsonFileNames);
     if (!jsonFiles.length) {
       throw new Error(
         "当前文件夹没有可转换的 .json（已跳过 package.json、rrvideo.defaults.json、*.config.json 等）。",
@@ -728,9 +720,11 @@ async function runPipeline(win, opts) {
     const args = ["--input", inputAbs, "--output", outputAbs, "--config", tempConfigPath];
     const itemIndex = itemIndexByJson.get(base);
     logTo(win, `开始：${base} → ${outName}`);
-    if (itemIndex != null) {
-      progressTo(win, { itemIndex, itemStatus: "exporting" });
-    }
+    progressTo(win, {
+      ...(itemIndex != null ? { itemIndex } : {}),
+      jsonFile: base,
+      itemStatus: "exporting",
+    });
     progressTo(win, {
       completed: convertFinishedCount,
       total: totalSteps,
@@ -752,24 +746,30 @@ async function runPipeline(win, opts) {
       ok += 1;
       successOutNameByJson.set(base, outName);
       logTo(win, `完成：${outName}`);
-      if (itemIndex != null) {
-        progressTo(win, { itemIndex, itemStatus: "success" });
-      }
+      progressTo(win, {
+        ...(itemIndex != null ? { itemIndex } : {}),
+        jsonFile: base,
+        itemStatus: "success",
+      });
     } catch (e) {
       if (e instanceof PipelineAbortError || isPipelineAborted(session)) {
         cancelled = true;
-        if (itemIndex != null) {
-          progressTo(win, { itemIndex, itemStatus: "cancelled" });
-        }
+        progressTo(win, {
+          ...(itemIndex != null ? { itemIndex } : {}),
+          jsonFile: base,
+          itemStatus: "cancelled",
+        });
         return;
       }
       fail += 1;
       failedJsonBases.add(base);
       logTo(win, `失败：${base}`);
       logTo(win, String(e.message || e));
-      if (itemIndex != null) {
-        progressTo(win, { itemIndex, itemStatus: "failed" });
-      }
+      progressTo(win, {
+        ...(itemIndex != null ? { itemIndex } : {}),
+        jsonFile: base,
+        itemStatus: "failed",
+      });
     } finally {
       convertFinishedCount += 1;
       progressTo(win, {
@@ -818,9 +818,12 @@ async function runPipeline(win, opts) {
     if (cancelled || isPipelineAborted(session)) {
       for (const base of jsonFiles) {
         const itemIndex = itemIndexByJson.get(base);
-        if (itemIndex == null) continue;
         if (successOutNameByJson.has(base) || failedJsonBases.has(base)) continue;
-        progressTo(win, { itemIndex, itemStatus: "cancelled" });
+        progressTo(win, {
+          ...(itemIndex != null ? { itemIndex } : {}),
+          jsonFile: base,
+          itemStatus: "cancelled",
+        });
       }
       logTo(win, `--- 导出已取消：成功 ${ok}，失败 ${fail}`);
       progressTo(win, {
@@ -1119,6 +1122,115 @@ ipcMain.handle("select-output-folder", async () => {
   return filePaths[0];
 });
 
+ipcMain.handle("get-json-folder", async () => {
+  return getJsonSourceDir(app);
+});
+
+ipcMain.handle("select-json-folder", async () => {
+  const savedDir = await getJsonSourceDir(app);
+  const exportDir = await getExportDir(app);
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    title: "选择包含 JSON 的文件夹",
+    properties: ["openDirectory"],
+    defaultPath: savedDir || exportDir || path.join(os.homedir(), "Downloads"),
+  });
+  if (canceled || !filePaths[0]) return null;
+  await setJsonSourceDir(app, filePaths[0]);
+  return filePaths[0];
+});
+
+ipcMain.handle("list-json-files", (_e, dir) => {
+  try {
+    assertWorkDir(dir);
+    const names = listWorkdirJsonFiles(dir);
+    const files = names.map((name) => {
+      const abs = path.join(dir, name);
+      const mp4 = path.join(dir, `${path.basename(name, ".json")}.mp4`);
+      let size = 0;
+      try {
+        size = fs.statSync(abs).size;
+      } catch {
+        size = 0;
+      }
+      return {
+        name,
+        size,
+        hasMp4: fs.existsSync(mp4),
+      };
+    });
+    return { success: true, files };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message || String(error),
+    };
+  }
+});
+
+ipcMain.handle("export-json-folder", async (_e, payload) => {
+  const win = BrowserWindow.fromWebContents(_e.sender);
+  const session = beginPipelineSession();
+  try {
+    const workDir = payload.workDir;
+    assertWorkDir(workDir);
+    const fileNames = Array.isArray(payload.fileNames) ? payload.fileNames : null;
+    const isPartial = Boolean(fileNames && fileNames.length);
+    const mergeVideos = payload.mergeVideos === true
+      || (!isPartial && payload.mergeVideos !== false);
+    const result = await runPipeline(win, {
+      workDir,
+      jsonFileNames: isPartial ? fileNames : null,
+      cleanupJson: false,
+      mergeVideos,
+      mergedFileName: payload.mergedFileName,
+      fps: payload.fps,
+      parallel: payload.parallel,
+      session,
+    });
+    return { success: true, result, outputDir: workDir };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message || String(error),
+    };
+  } finally {
+    endPipelineSession(session);
+  }
+});
+
+ipcMain.handle("merge-json-folder", async (_e, payload) => {
+  const win = BrowserWindow.fromWebContents(_e.sender);
+  const session = beginPipelineSession();
+  try {
+    const workDir = payload.workDir;
+    assertWorkDir(workDir);
+    const jsonFiles = resolveWorkdirJsonFiles(workDir, payload.fileNames);
+    const { clips, outName, outputAbs } = collectJsonMp4Clips(
+      win,
+      workDir,
+      jsonFiles,
+      payload.mergedFileName,
+    );
+    const result = await runMergeOnly(win, {
+      workDir,
+      clips,
+      outName,
+      outputAbs,
+      fps: payload.fps,
+      session,
+      mergeLabel: "按 JSON 顺序",
+    });
+    return { success: true, result, outputDir: workDir };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message || String(error),
+    };
+  } finally {
+    endPipelineSession(session);
+  }
+});
+
 ipcMain.handle("cancel-export", () => {
   return { success: cancelActivePipeline() };
 });
@@ -1139,9 +1251,10 @@ ipcMain.handle("merge-trajectory", async (_e, payload) => {
       baseDir,
       payload,
     );
+    const mergeItems = resolveExportableItems(lastTrajectoryCache, payload.itemIndices);
     const result = await runMergeOnly(win, {
       workDir,
-      items: lastTrajectoryCache.items,
+      items: mergeItems,
       mergedFileName,
       fps: payload.fps,
       session,
@@ -1175,10 +1288,9 @@ ipcMain.handle("export-trajectory", async (_e, payload) => {
       payload,
     );
 
-    const isSingleExport = Array.isArray(payload.itemIndices) && payload.itemIndices.length > 0;
-    const mergeVideos = isSingleExport
-      ? payload.mergeVideos === true
-      : payload.mergeVideos !== false;
+    const isPartialExport = Array.isArray(payload.itemIndices) && payload.itemIndices.length > 0;
+    const mergeVideos = payload.mergeVideos === true
+      || (!isPartialExport && payload.mergeVideos !== false);
 
     const result = await runPipeline(win, {
       workDir,

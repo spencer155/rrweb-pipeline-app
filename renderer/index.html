@@ -11,9 +11,13 @@
 <body>
   <div class="shell">
     <div class="panel-policy">
+      <div class="mode-tabs" role="tablist">
+        <button id="tabTrajectory" type="button" class="mode-tab is-active" role="tab" aria-selected="true">保单轨迹</button>
+        <button id="tabJsonFolder" type="button" class="mode-tab" role="tab" aria-selected="false">本地 JSON</button>
+      </div>
       <div class="policy-layout">
         <aside class="policy-side">
-          <section class="panel">
+          <section id="trajectoryQueryPanel" class="panel">
             <div class="row">
               <label class="label" for="policyUuid">policyUuid</label>
               <input id="policyUuid" class="input grow" type="text" spellcheck="false" placeholder="至少 32 位" value="" />
@@ -27,9 +31,21 @@
             </div>
           </section>
 
+          <section id="jsonFolderPanel" class="panel hidden">
+            <h3 class="panel-title">本地 JSON</h3>
+            <div class="row">
+              <label class="label">源文件夹</label>
+              <div class="field grow">
+                <input id="jsonSourceDir" type="text" readonly placeholder="未选择" />
+                <button id="pickJsonDir" type="button" class="btn secondary">浏览…</button>
+              </div>
+            </div>
+            <p class="export-hint">扫描该文件夹中的 JSON（不含子目录），在同一目录生成同名 MP4</p>
+          </section>
+
           <section class="panel export-panel">
             <h3 class="panel-title">导出设置</h3>
-            <div class="row">
+            <div id="exportDirRow" class="row">
               <label class="label">导出目录</label>
               <div class="field grow">
                 <input id="exportDir" type="text" readonly placeholder="未选择" />
@@ -56,11 +72,17 @@
                 <option value="4">4</option>
               </select>
             </div>
-            <div class="actions export-actions">
+            <div id="trajectoryActions" class="actions export-actions">
               <button id="exportAllBtn" type="button" class="btn primary" disabled>导出全部 MP4</button>
               <button id="mergeOnlyBtn" type="button" class="btn secondary" disabled>仅合并视频</button>
               <button id="stopExportBtn" type="button" class="btn secondary hidden" disabled>停止导出</button>
-              <p class="export-hint">查询成功后可导出；单独补导失败片段后，可点「仅合并视频」重新合并（合并前会校验各片段）</p>
+              <p class="export-hint">可勾选列表中的片段；未勾选时导出/合并全部，勾选后仅处理选中项</p>
+            </div>
+            <div id="jsonActions" class="actions export-actions hidden">
+              <button id="convertJsonBtn" type="button" class="btn primary" disabled>转为视频</button>
+              <button id="mergeJsonBtn" type="button" class="btn secondary" disabled>仅合并视频</button>
+              <button id="stopJsonBtn" type="button" class="btn secondary hidden" disabled>停止导出</button>
+              <p class="export-hint">未勾选时转换文件夹内全部 JSON，勾选后仅处理选中文件。MP4 生成在同一文件夹</p>
             </div>
           </section>
 
@@ -75,7 +97,7 @@
         </aside>
 
         <div class="policy-main">
-          <section class="trajectory-list-wrap panel">
+          <section id="trajectoryListPanel" class="trajectory-list-wrap panel">
             <div class="list-head">
               <h3 class="panel-title">操作轨迹列表</h3>
               <span id="trajectoryCount" class="list-meta"></span>
@@ -85,6 +107,9 @@
               <table class="trajectory-table">
                 <thead>
                   <tr>
+                    <th class="col-check">
+                      <input id="trajectorySelectAll" type="checkbox" aria-label="全选可导出项" title="全选可导出项" />
+                    </th>
                     <th>页面</th>
                     <th>时间</th>
                     <th>视频时长</th>
@@ -93,6 +118,30 @@
                   </tr>
                 </thead>
                 <tbody id="trajectoryBody"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section id="jsonListPanel" class="trajectory-list-wrap panel hidden">
+            <div class="list-head">
+              <h3 class="panel-title">JSON 文件</h3>
+              <span id="jsonFileCount" class="list-meta"></span>
+            </div>
+            <div id="jsonEmpty" class="empty-hint">选择文件夹后，这里会列出可转换的 JSON 文件</div>
+            <div id="jsonTableWrap" class="table-wrap hidden">
+              <table class="trajectory-table">
+                <thead>
+                  <tr>
+                    <th class="col-check">
+                      <input id="jsonSelectAll" type="checkbox" aria-label="全选 JSON 文件" title="全选 JSON 文件" />
+                    </th>
+                    <th>文件</th>
+                    <th>大小</th>
+                    <th>视频</th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+                <tbody id="jsonFileBody"></tbody>
               </table>
             </div>
           </section>
